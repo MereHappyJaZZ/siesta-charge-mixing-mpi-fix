@@ -6,7 +6,7 @@ This repo provides a **drop-in fix**: route the (cheap) charge-mixing FFT throug
 
 ![Convergence, stock SIESTA vs. with the fix](figures/convergence_before_after.png)
 
-*Same calculation — Kerker charge mixing, 16 MPI ranks, FFT mesh 32×180×2430 — with stock SIESTA 5.4.2 vs. with this fix. **Left:** stock SIESTA's total energy explodes to +8.2×10⁷ eV at iteration 2 and stays pinned there; with the fix it remains physical and converges to the ground state. **Right:** the convergence error on a log scale — stock is stuck near 10⁸ eV (diverged), the fix decays smoothly toward convergence.*
+*Same calculation — Kerker charge mixing, 16 MPI ranks, FFT mesh 32×180×2430 — with stock SIESTA 5.4.2 vs. with this fix. **Left:** stock SIESTA's total energy explodes to +8.2×10⁷ eV at iteration 2 and stays pinned there; with the fix it remains physical and converges to the ground state. **Right:** the convergence error on a log scale — stock is stuck near 10⁸ eV (diverged), the fix decays smoothly toward convergence. (This is a warm-started run; the single first-step bump in the fixed curve is a benign artifact of taking the raw output density on iteration 1, and disappears with `SCF.MixCharge.SCF1 true` — see the clean cold-start descent below.)*
 
 ---
 
@@ -21,6 +21,14 @@ The development system is a **graphene-on-chromium device cell** (209 atoms; FFT
 ![The graphene–chromium device cell](figures/system_structure.png)
 
 *The test system: a **209-atom graphene–chromium edge contact** (160 C + 48 Cr + 1 interfacial O). **Top:** side view — a graphene channel (edge-on) runs ~169 Å along the transport direction *z*, meeting a chromium contact slab through a single interfacial oxygen, inside a strongly elongated 2.49 × 14.11 × **200.4 Å** cell. That elongation is exactly what makes the FFT mesh so lopsided (**32 × 180 × 2430**) and triggers the distributed-transpose bug in parallel. **Bottom:** top-down view of the contact, showing the honeycomb channel meeting the metal (periodic x-images drawn on either side).*
+
+## Why it matters: cold-start convergence
+
+Fixing parallel charge mixing isn't just about avoiding a crash — it unlocks the reason you'd reach for reciprocal-space (Kerker) charge mixing in the first place: **robust convergence of a metallic cell from scratch.** Kerker mixing is the textbook cure for charge sloshing in large metallic systems, but the FFT bug made it unusable in parallel. With the fix, a **cold start from the neutral-atom density guess** (no prior density matrix — the realistic case when every structure is different) descends cleanly to the ground state:
+
+![Cold-start convergence with charge mixing](figures/cold_start_convergence.png)
+
+*Cold start (no prior density matrix), fixed parallel charge mixing at 16 MPI ranks. From the +2.5×10⁵ eV atomic-density guess the SCF descends **monotonically** to the −142,777 eV ground state, reaching < 1 eV of the converged energy by ~iteration 20 — no charge sloshing, no per-structure hand-tuning. Recipe: `SCF.Mix charge`, Kerker `SCF.Kerker.q0sq 1.0 Ry`, `SCF.RhoG.DIIS.Depth 8`, `SCF.RhoG.DIIS.UseSVD False`, `SCF.MixCharge.SCF1 true`, weight 0.10, Methfessel-Paxton smearing at 1000 K.*
 
 ## Symptom
 
