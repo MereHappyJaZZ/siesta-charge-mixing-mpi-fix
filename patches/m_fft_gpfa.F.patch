@@ -1,0 +1,20 @@
+--- a/Src/m_fft_gpfa.F
++++ b/Src/m_fft_gpfa.F
+@@ -126,7 +126,7 @@
+ *
+       ! NOTE: The original declaration of these arguments (here and below)
+       ! was: A(*), B(*)
+-      REAL(wp) ::     A(:), B(:)
++      REAL(wp) ::     A(*), B(*)
+       REAL(dp)  TRIGS(*)
+       INTEGER INC, JUMP, N, LOT, ISIGN
+ C
+@@ -2584,7 +2584,7 @@
+ 
+       IMPLICIT NONE
+ *
+-      REAL(wp) ::     A(:), B(:)
++      REAL(wp) ::     A(*), B(*)
+       REAL(dp)  TRIGS(*)
+       INTEGER INC, JUMP, N, LOT, ISIGN
+ C

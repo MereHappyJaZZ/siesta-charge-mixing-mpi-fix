@@ -1,0 +1,96 @@
+--- a/Src/fft.F
++++ b/Src/fft.F
+@@ -76,6 +76,7 @@
+       PUBLIC :: getFFTLims
+       PUBLIC :: fft_set_fftw
+       PUBLIC :: fft_trigs_reset
++      PUBLIC :: fft_serial_global
+ 
+       PRIVATE ! Nothing is declared public beyond this point
+       logical :: frsttime = .TRUE.
+@@ -642,7 +643,7 @@
+               call fftw_execute_dft( plan(2), in, in )
+             else
+ #endif
+-              call gpfa(f2(IOffSet:2*n),f2(IOffSet+1:n), trigs(:,2),
++              call gpfa(f2(IOffSet:2*n),f2(IOffSet+1:2*n), trigs(:,2),
+      .              2*n1b, 2, n2, n1b, -isn )
+ #ifdef SIESTA__FFTW
+             endif ! use_fftw
+@@ -713,7 +714,7 @@
+           call fftw_execute_dft( plan(2), in, in )
+         else
+ #endif
+-        call gpfa(f1(IOffSet:2*n),f1(IOffSet+1:n),trigs(:,2),
++        call gpfa(f1(IOffSet:2*n),f1(IOffSet+1:2*n),trigs(:,2),
+      .             2*n1,2,n2,n1,-isn)
+ #ifdef SIESTA__FFTW
+         endif ! use_fftw
+@@ -770,9 +771,11 @@
+       sbox(2,:) = (/ s1, s2, s3 /)
+       dbox(1,:) = 1
+       dbox(2,:) = (/ d1, d2, d3 /)
+-C     Compute the buffer sizes
+-      bsize_s = (s1*s2*s3/sbox(2,src))*(srcd(2)-srcd(1))
+-      bsize_r = (d1*d2*d3/dbox(2,dst))*(dstd(2)-dstd(1))
++C     Compute the buffer sizes.  Use the MAXIMUM pencil extent over all
++C     nodes (not node 1's), so the buffers are large enough when the mesh
++C     divides unevenly across processors (else later, larger nodes overrun).
++      bsize_s = (s1*s2*s3/sbox(2,src))*maxval(srcd(2:np+1)-srcd(1:np))
++      bsize_r = (d1*d2*d3/dbox(2,dst))*maxval(dstd(2:np+1)-dstd(1:np))
+       call re_alloc( sbuf, 1, 2, 1, bsize_s, 'sbuf', 'fft' )
+       call re_alloc( rbuf, 1, 2, 1, bsize_r, 'rbuf', 'fft' )
+ C
+@@ -857,5 +860,52 @@
+ #endif /* MPI */
+ 
+ !******************************************************************************
++!
++!     Exact serial global 3-D FFT (no MPI).  Operates on a packed
++!     complex array f(2,*) in GLOBAL natural order
++!        index = 1 + i1 + n1*i2 + n1*n2*i3  (0-based global coords).
++!     dir = -1 (FORWARD) / +1 (BACKWARD), matching the convention of
++!     the distributed fft() (isn).  Reuses the module trigs(:,1:3) which
++!     were built by fft_init for the full dims gmesh(1:3).
++!
++      subroutine fft_serial_global( f, n1, n2, n3, dir )
++      implicit none
++      integer :: n1, n2, n3, dir
++      real(dp), target :: f(2,*)      ! packed complex, global natural order
++      integer :: n, i, ioff, isn
++      real(dp), pointer :: a(:)
++      isn = dir
++      n = n1*n2*n3
++      call c_f_pointer( c_loc(f(1,1)), a, shape=[2*n] )
++C
++C     FFT in X direction
++C
++      call gpfa( a(1:2*n), a(2:2*n), trigs(:,1), 2, 2*n1, n1,
++     &           n2*n3, -isn )
++C
++C     FFT in Y direction
++C
++      ioff = 1
++      do i = 0, n3-1
++        call gpfa( a(ioff:2*n), a(ioff+1:2*n), trigs(:,2), 2*n1, 2,
++     &             n2, n1, -isn )
++        ioff = ioff + 2*n1*n2
++      enddo
++C
++C     FFT in Z direction
++C
++      call gpfa( a(1:2*n), a(2:2*n), trigs(:,3), 2*n1*n2, 2, n3,
++     &           n1*n2, -isn )
++C
++C     Scale on the backward transform
++C
++      if (isn > 0) then
++        do i = 1, 2*n
++          a(i) = a(i) / dble(n)
++        enddo
++      endif
++      end subroutine fft_serial_global
++
++!******************************************************************************
+ 
+       END MODULE m_fft

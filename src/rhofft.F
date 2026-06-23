@@ -1,0 +1,291 @@
+! 
+! Copyright (C) 1996-2016	The SIESTA group
+!  This file is distributed under the terms of the
+!  GNU General Public License: see COPYING in the top directory
+!  or http://www.gnu.org/copyleft/gpl.txt.
+! See Docs/Contributors.txt for a list of contributors.
+!
+#include "mpi_macros.f"
+
+      module m_rhofft
+
+      use precision
+
+      integer, parameter, public  :: FORWARD = -1
+      integer, parameter, public  :: BACKWARD = +1
+
+      public :: rhofft
+
+      CONTAINS
+
+      subroutine rhofft( CELL, N1, N2, N3, Mesh, nspin, RHO, rhog,
+     $                   direction)
+
+C *********************************************************************
+C WRITTEN BY J.M.SOLER, JUNE 1995.
+C **************** INPUT **********************************************
+C REAL*8  CELL(3,3)     : UNIT CELL VECTORS
+C INTEGER N1,N2,N3      : NUMBER OF LOCAL MESH DIVISIONS IN EACH CELL VECTOR
+C INTEGER Mesh(3)       : Number of global mesh divisions
+C REAL*4  RHO(N1,N2,N3) : DENSITIY AT MESH POINTS
+C *********************************************************************
+
+C     Modules
+      use precision,   only : dp, grid_p
+      use sys,         only : die
+      use m_fft,       only : fft     ! 3-D fast Fourier transform
+      use m_fft,       only : fft_init
+      use parallel,    only : Node, Nodes
+      use cellsubs,    only : reclat  ! Finds reciprocal lattice vectors
+      use cellsubs,    only : volcel  ! Finds unit cell volume
+      use alloc,       only : re_alloc, de_alloc
+
+      implicit          none
+
+C     Input/output variables
+      integer               :: N1, N2, N3, Mesh(3), nspin
+      integer, intent(in)   :: direction
+      real(grid_p)          :: RHO(N1*N2*N3,nspin)
+      real(dp)              :: CELL(3,3)
+      real(grid_p)          :: rhog(2,N1*N2*N3,nspin)
+
+C     Local variables
+      integer               :: ispin, ng, sz1, sz2
+      real(dp)              :: VOLUME, b(3,3)
+      real(grid_p), pointer :: rhogaux(:,:)
+
+#ifdef DEBUG
+      call write_debug( '    PRE rhofft' )
+#endif
+C     Start time counter
+      call timer( 'rhofft', 1 )
+
+C     Find unit cell volume
+      VOLUME = VOLCEL( CELL )
+
+C     Find reciprocal lattice vectors
+      call reclat(CELL, B, 1 )
+
+      NG = mesh(1) * mesh(2) * mesh(3)
+
+C     Initiallize FFT
+
+      ! Here we need to go back to the x-pencil
+      ! distribution after the transform, since we carry
+      ! out a single forward or backward operation
+
+      call fft_init( Mesh, sz1, sz2, pin_x_distribution=.true. )
+
+C     Allocate auxiliar memory
+      nullify(rhogaux)
+      call re_alloc( rhogaux, 1, 2, 1, sz2, 'rhogaux', 'rhofft' )
+
+
+      if (direction == FORWARD) then
+         rhog(1,:,:) = RHO(:,:)
+         rhog(2,:,:) = 0.0_grid_p
+
+         if (Nodes > 1) then
+            ! Parallel distributed fft() corrupts large meshes.
+            ! Use the exact serial-FFT gather bypass instead.
+            call rhofft_bypass( N1, N2, N3, Mesh, nspin, rhog, -1 )
+         else
+            do ispin = 1, nspin
+               call fft( rhog(1,1,ispin), rhogaux, -1 )
+            enddo
+         endif
+         ! Units: electrons per unit cell
+         rhog(:,:,:) = rhog(:,:,:) * volume / dble(ng)
+      else if (direction == BACKWARD) then
+         if (Nodes > 1) then
+            call rhofft_bypass( N1, N2, N3, Mesh, nspin, rhog, +1 )
+         else
+            do ispin = 1, nspin
+               call fft( rhog(1,1,ispin), rhogaux, +1 )
+            enddo
+         endif
+         rho(:,:) = rhog(1,:,:) * ng / volume
+         !  print *, "sum(rho)*dvol", sum(rho)*volume/dble(ng)
+      else
+         call die("wrong fft direction")
+      endif
+
+C     Free memory
+      call de_alloc( rhogaux, 'rhogaux', 'rhofft' )
+
+C     Stop time counter
+      call timer( 'rhofft', 2 )
+
+#ifdef DEBUG
+      call write_debug( '    POS rhofft' )
+#endif
+      end subroutine rhofft
+
+!=====================================================================
+!     Exact serial-FFT gather bypass for the charge-mixing FFT.
+!     The distributed fft() corrupts large meshes in parallel; here we
+!     gather the full mesh to node 0, do a bit-exact serial 3-D FFT,
+!     and scatter back, producing rhog in the SAME local layout that
+!     order_rhog (m_rhog) indexes.
+!
+!     Local layout (per node, full X, contiguous global y,z block):
+!        J = 1 + J1 + N1*J2L + N1*N2*J3L
+!     with J1=0..N1-1, J2L=0..ny-1, J3L=0..nz-1, N1=Mesh(1), N2=ny.
+!     Global natural index:
+!        1 + i1 + M1*i2 + M1*M2*i3   (0-based global coords)
+!     where i1=J1, i2=J2min+J2L, i3=J3min+J3L.
+!=====================================================================
+      subroutine rhofft_bypass( N1, N2, N3, gMesh, nspin, rhog, dir )
+
+      use precision,    only : dp, grid_p
+      use parallel,     only : Node, Nodes
+      use mesh,         only : nsm
+      use moreMeshSubs, only : UNIFORM, getMeshBox
+      use m_fft,        only : fft_serial_global
+#ifdef MPI
+      use mpi_siesta
+#endif
+
+      implicit none
+
+      integer, intent(in)    :: N1, N2, N3, gMesh(3), nspin, dir
+      real(grid_p)           :: rhog(2,N1*N2*N3,nspin)
+
+      integer :: M1, M2, M3, ispin, p, ny, nz, nloc
+      integer :: i1, i2, i3, j2l, j3l, j, g, j2m, j3m
+      integer, pointer :: box(:,:,:)
+      real(dp), allocatable :: gbuf(:)
+      real(dp), allocatable :: sbuf(:)
+#ifdef MPI
+      integer :: MPIerror, maxloc_size
+      MPI_STATUS_TYPE :: Status
+#endif
+
+      M1 = gMesh(1)
+      M2 = gMesh(2)
+      M3 = gMesh(3)
+
+      call getMeshBox( UNIFORM, box )
+
+#ifdef MPI
+C     Largest local slice over all nodes (for the comm buffer on node 0)
+      maxloc_size = 0
+      do p = 0, Nodes-1
+        ny = (box(2,2,p+1) - box(1,2,p+1) + 1)*NSM
+        nz = (box(2,3,p+1) - box(1,3,p+1) + 1)*NSM
+        maxloc_size = max(maxloc_size, M1*ny*nz)
+      enddo
+#endif
+
+      if (Node == 0) then
+        allocate( gbuf(2*M1*M2*M3) )
+#ifdef MPI
+        allocate( sbuf(2*maxloc_size) )
+#endif
+      else
+        allocate( sbuf(2*N1*N2*N3) )
+      endif
+
+      do ispin = 1, nspin
+
+C       ----- GATHER to node 0 (global natural order) -----
+        if (Node == 0) then
+          do p = 0, Nodes-1
+            j2m = (box(1,2,p+1)-1)*NSM
+            j3m = (box(1,3,p+1)-1)*NSM
+            ny  = (box(2,2,p+1) - box(1,2,p+1) + 1)*NSM
+            nz  = (box(2,3,p+1) - box(1,3,p+1) + 1)*NSM
+            nloc = M1*ny*nz
+            if (p == 0) then
+              do j = 1, nloc
+                sbuf(2*j-1) = rhog(1,j,ispin)
+                sbuf(2*j)   = rhog(2,j,ispin)
+              enddo
+#ifdef MPI
+            else
+              call MPI_Recv( sbuf, 2*nloc, MPI_double_precision, p, 1,
+     &                       MPI_Comm_World, Status, MPIerror )
+#endif
+            endif
+C           Unpack rank p's packed slice into the global array
+            do j3l = 0, nz-1
+              i3 = j3m + j3l
+              do j2l = 0, ny-1
+                i2 = j2m + j2l
+                do i1 = 0, M1-1
+                  j = 1 + i1 + M1*j2l + M1*ny*j3l
+                  g = 1 + i1 + M1*i2 + M1*M2*i3
+                  gbuf(2*g-1) = sbuf(2*j-1)
+                  gbuf(2*g)   = sbuf(2*j)
+                enddo
+              enddo
+            enddo
+          enddo
+#ifdef MPI
+        else
+          do j = 1, N1*N2*N3
+            sbuf(2*j-1) = rhog(1,j,ispin)
+            sbuf(2*j)   = rhog(2,j,ispin)
+          enddo
+          call MPI_Send( sbuf, 2*N1*N2*N3, MPI_double_precision, 0, 1,
+     &                   MPI_Comm_World, MPIerror )
+#endif
+        endif
+
+C       ----- EXACT serial 3-D FFT on node 0 -----
+        if (Node == 0) then
+          call fft_serial_global( gbuf, M1, M2, M3, dir )
+        endif
+
+C       ----- SCATTER back to each node's local slice -----
+        if (Node == 0) then
+          do p = 0, Nodes-1
+            j2m = (box(1,2,p+1)-1)*NSM
+            j3m = (box(1,3,p+1)-1)*NSM
+            ny  = (box(2,2,p+1) - box(1,2,p+1) + 1)*NSM
+            nz  = (box(2,3,p+1) - box(1,3,p+1) + 1)*NSM
+            nloc = M1*ny*nz
+C           Pack rank p's slice from the global array
+            do j3l = 0, nz-1
+              i3 = j3m + j3l
+              do j2l = 0, ny-1
+                i2 = j2m + j2l
+                do i1 = 0, M1-1
+                  j = 1 + i1 + M1*j2l + M1*ny*j3l
+                  g = 1 + i1 + M1*i2 + M1*M2*i3
+                  sbuf(2*j-1) = gbuf(2*g-1)
+                  sbuf(2*j)   = gbuf(2*g)
+                enddo
+              enddo
+            enddo
+            if (p == 0) then
+              do j = 1, nloc
+                rhog(1,j,ispin) = real( sbuf(2*j-1), grid_p )
+                rhog(2,j,ispin) = real( sbuf(2*j),   grid_p )
+              enddo
+#ifdef MPI
+            else
+              call MPI_Send( sbuf, 2*nloc, MPI_double_precision, p, 2,
+     &                       MPI_Comm_World, MPIerror )
+#endif
+            endif
+          enddo
+#ifdef MPI
+        else
+          call MPI_Recv( sbuf, 2*N1*N2*N3, MPI_double_precision, 0, 2,
+     &                   MPI_Comm_World, Status, MPIerror )
+          do j = 1, N1*N2*N3
+            rhog(1,j,ispin) = real( sbuf(2*j-1), grid_p )
+            rhog(2,j,ispin) = real( sbuf(2*j),   grid_p )
+          enddo
+#endif
+        endif
+
+      enddo  ! ispin
+
+      if (allocated(gbuf)) deallocate( gbuf )
+      if (allocated(sbuf)) deallocate( sbuf )
+
+      end subroutine rhofft_bypass
+
+      end module m_rhofft
