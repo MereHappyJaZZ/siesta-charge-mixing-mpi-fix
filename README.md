@@ -6,7 +6,7 @@ This repo provides a **drop-in fix**: route the (cheap) charge-mixing FFT throug
 
 ![Convergence, stock SIESTA vs. with the fix](figures/convergence_before_after.png)
 
-*Same calculation — Kerker charge mixing, 16 MPI ranks, FFT mesh 32×180×2430 — with stock SIESTA 5.4.2 vs. with this fix. **Left:** stock SIESTA's total energy explodes to +8.2×10⁷ eV at iteration 2 and stays pinned there; with the fix it remains physical and converges to the ground state. **Right:** the convergence error on a log scale — stock is stuck near 10⁸ eV (diverged), the fix decays smoothly toward convergence. (This is a warm-started run; the single first-step bump in the fixed curve is a benign artifact of taking the raw output density on iteration 1, and disappears with `SCF.MixCharge.SCF1 true` — see the clean cold-start descent below.)*
+*The identical calculation — `SCF.Mix charge` (Kerker / ρ(G) mixing), **cold start from the neutral-atom density guess** (no prior density matrix), 16 MPI ranks, FFT mesh 32×180×2430 — with stock SIESTA 5.4.2 vs. with this fix. **Left:** from the same +2.5×10⁵ eV starting guess, stock SIESTA's energy explodes to +8.2×10⁷ eV at iteration 2 and stays pinned (the parallel-FFT bug — start-independent), while the fix descends cleanly through zero to the −142,777 eV ground state. **Right:** convergence error on a log scale — stock is stuck near 10⁸ eV (diverged); the fix reaches < 1 eV of the converged energy by ~iteration 20. No prior density matrix, no per-structure tuning — exactly the "drop it on any structure" behavior charge mixing is meant to give.*
 
 ---
 
@@ -24,31 +24,28 @@ The development system is a **graphene-on-chromium device cell** (209 atoms; FFT
 
 ## Why it matters: cold-start convergence
 
-Fixing parallel charge mixing isn't just about avoiding a crash — it unlocks the reason you'd reach for reciprocal-space (Kerker) charge mixing in the first place: **robust convergence of a metallic cell from scratch.** Kerker mixing is the textbook cure for charge sloshing in large metallic systems, but the FFT bug made it unusable in parallel. With the fix, a **cold start from the neutral-atom density guess** (no prior density matrix — the realistic case when every structure is different) descends cleanly to the ground state:
+Fixing parallel charge mixing isn't just about avoiding a crash — it unlocks the reason you'd reach for reciprocal-space (Kerker) charge mixing in the first place: **robust convergence of a metallic cell from scratch.** Kerker mixing is the textbook cure for charge sloshing in large metallic systems, but the FFT bug made it unusable in parallel. The cold-start comparison above (no prior density matrix — the realistic case when every structure is different) is the payoff: stock parallel charge mixing diverges, while the fix descends monotonically to the ground state in ~20 iterations with no per-structure hand-tuning.
 
-![Cold-start convergence with charge mixing](figures/cold_start_convergence.png)
-
-*Cold start (no prior density matrix), fixed parallel charge mixing at 16 MPI ranks. From the +2.5×10⁵ eV atomic-density guess the SCF descends **monotonically** to the −142,777 eV ground state, reaching < 1 eV of the converged energy by ~iteration 20 — no charge sloshing, no per-structure hand-tuning. Recipe: `SCF.Mix charge`, Kerker `SCF.Kerker.q0sq 1.0 Ry`, `SCF.RhoG.DIIS.Depth 8`, `SCF.RhoG.DIIS.UseSVD False`, `SCF.MixCharge.SCF1 true`, weight 0.10, Methfessel-Paxton smearing at 1000 K.*
+The recipe used for the cold run: `SCF.Mix charge`, Kerker `SCF.Kerker.q0sq 1.0 Ry`, `SCF.RhoG.DIIS.Depth 8`, `SCF.RhoG.DIIS.UseSVD False`, **`SCF.MixCharge.SCF1 true`** (damps the first step — without it a warm-started run shows a large but harmless first-iteration transient), weight 0.10, Methfessel-Paxton smearing at 1000 K.
 
 ## Symptom
 
-`SCF.Mix charge`, warm-started, in an MPI run on the large mesh:
+`SCF.Mix charge` in an MPI run on the large mesh, cold from the atomic-density guess:
 
 ```
-scf: 1   -142776.6 eV
-scf: 2  +82,178,078 eV     <-- explodes, then stays pinned (often ends in SIGSEGV)
+stock SIESTA 5.4.2 (parallel):
+  scf: 1    +250,542 eV
+  scf: 2  +81,972,023 eV    <-- explodes, then stays pinned (often ends in SIGSEGV)
+
+with this fix (parallel), identical input:
+  scf: 1    +250,542 eV
+  scf: 2     +35,638 eV
+  scf: 3     -93,086 eV      <-- descending cleanly
+   ...
+  scf:20    -142,776 eV      <-- converged ground state
 ```
 
-The identical input in **serial** is fine, and **with this fix the parallel run reproduces it**:
-
-```
-scf: 1   -142776.6 eV
-scf: 2     +235,969.9 eV   <-- a normal first-step Kerker overshoot
-scf: 3      +28,873.8 eV
-scf: 4      -38,160.8 eV   <-- recovering; converges normally
- ...
-scf:20    -142,648.9 eV    <-- approaching the ground state
-```
+The same stock calculation is **correct in serial** and for small meshes — only the large-mesh *parallel* run corrupts the density.
 
 ## Validation
 
