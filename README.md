@@ -14,7 +14,13 @@ This repo provides a **drop-in fix**: route the (cheap) charge-mixing FFT throug
 
 Anyone using `SCF.Mix charge` (reciprocal-space / Kerker charge mixing — the textbook cure for charge sloshing in large metallic cells) in an **MPI** SIESTA run whose **FFT mesh has a large dimension**. Serial runs and small meshes are unaffected, which makes this easy to miss: it works on your laptop test and explodes on the cluster.
 
-The development system is a **graphene-on-chromium device cell** (210 atoms; FFT mesh **32 × 180 × 2430**, elongated along the transport direction), warm-started from a converged density matrix — but the bug is general to large meshes.
+The development system is a **graphene-on-chromium device cell** (209 atoms; FFT mesh **32 × 180 × 2430**, elongated along the transport direction) — but the bug is general to large meshes.
+
+## The test system
+
+![The graphene–chromium device cell](figures/system_structure.png)
+
+*The test system: a **209-atom graphene–chromium edge contact** (160 C + 48 Cr + 1 interfacial O). **Top:** side view — a graphene channel (edge-on) runs ~169 Å along the transport direction *z*, meeting a chromium contact slab through a single interfacial oxygen, inside a strongly elongated 2.49 × 14.11 × **200.4 Å** cell. That elongation is exactly what makes the FFT mesh so lopsided (**32 × 180 × 2430**) and triggers the distributed-transpose bug in parallel. **Bottom:** top-down view of the contact, showing the honeycomb channel meeting the metal (periodic x-images drawn on either side).*
 
 ## Symptom
 
